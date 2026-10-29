@@ -1,0 +1,2 @@
+# Keep the patch byte-exact so it applies on any checkout
+*.patch -text

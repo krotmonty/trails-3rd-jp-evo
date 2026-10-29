@@ -1,0 +1,8 @@
+# Generated or downloaded locally; game text and tools are not redistributed
+build/
+backup/
+downloads/
+src/
+tools/venv/
+web/en.json
+__pycache__/

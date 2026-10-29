@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sora 3rd Lines</title>
+<style>
+  :root {
+    --bg: #15171c; --panel: #1d2027; --text: #eceef2; --muted: #8a91a0; --line: #2b2f38;
+    --accent: #7fb4ff; --jp-size: 34px; --en-size: 15px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f6f6f3; --panel: #ffffff; --text: #1d1f24; --muted: #6b7180; --line: #e2e2dc; --accent: #2a62c9;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f6f3; --panel: #ffffff; --text: #1d1f24; --muted: #6b7180; --line: #e2e2dc; --accent: #2a62c9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Noto Sans JP", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 1; display: flex; gap: 12px; align-items: center;
+    padding: 8px 16px; background: var(--bg); border-bottom: 1px solid var(--line);
+    font-size: 13px; color: var(--muted);
+  }
+  header .dot { width: 8px; height: 8px; border-radius: 50%; background: #d9534f; }
+  header .dot.on { background: #4caf50; }
+  header .spacer { flex: 1; }
+  header button, header select {
+    font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; padding: 3px 8px; cursor: pointer;
+  }
+  header { flex-wrap: wrap; }
+  @media (max-width: 420px) {
+    header { padding: 6px 12px; gap: 8px; }
+    #status { display: none; }
+  }
+  main { padding: 16px; max-width: 1100px; }
+  @media (max-width: 420px) { main { padding: 8px 12px; } }
+  .line { padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .jp { font-size: var(--jp-size); line-height: 1.55; white-space: pre-wrap; word-break: break-all; }
+  .en { margin-top: 6px; font-size: var(--en-size); line-height: 1.45; color: var(--muted);
+        white-space: pre-wrap; font-family: system-ui, sans-serif; }
+  .line:not(:first-child) .jp { font-size: calc(var(--jp-size) * 0.62); }
+  body.en-hover .en { filter: blur(5px); transition: filter .15s; }
+  body.en-hover .en:hover { filter: none; }
+  body.en-off .en { display: none; }
+  .empty { color: var(--muted); font-size: 15px; padding: 24px 0; }
+
+  /* Overlay strip (?overlay): only the current line, dark, no controls. */
+  body.overlay { background: #0d0f13; color: #f4f5f8; overflow: hidden; }
+  body.overlay header, body.overlay .empty { display: none; }
+  body.overlay main { max-width: none; padding: 10px 24px; position: fixed; left: 0; right: 0; bottom: 0; }
+  body.overlay .line { border: 0; padding: 0; }
+  body.overlay .line:not(:first-child) { display: none; }
+  body.overlay .en { color: #a9afbb; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span><span id="status">connecting…</span><span id="anki"></span>
+  <span class="spacer"></span>
+  <label>EN <select id="enMode">
+    <option value="show">show</option><option value="hover">blur</option><option value="off">off</option>
+  </select></label>
+  <button id="smaller" title="Smaller text">A−</button>
+  <button id="bigger" title="Bigger text">A+</button>
+  <button id="clear" title="Clear history">Clear</button>
+</header>
+<main id="lines"><div class="empty">Lines appear here as the game shows them.</div></main>
+<script>
+(() => {
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+  };
+  const overlay = new URLSearchParams(location.search).has("overlay");
+  document.body.classList.toggle("overlay", overlay);
+  const MAX = overlay ? 2 : 300;
+  const linesEl = document.getElementById("lines");
+  const dot = document.getElementById("dot");
+  const statusEl = document.getElementById("status");
+  let en = {};
+  fetch("en.json").then(r => r.json()).then(d => { en = d; }).catch(() => {});
+
+  const norm = s => s.replace(/\s/g, "");
+
+  let size = Number(store.get("jpSize", 34));
+  const applySize = () => document.documentElement.style.setProperty("--jp-size", size + "px");
+  applySize();
+  document.getElementById("bigger").onclick = () => { size = Math.min(72, size + 2); applySize(); store.set("jpSize", size); };
+  document.getElementById("smaller").onclick = () => { size = Math.max(16, size - 2); applySize(); store.set("jpSize", size); };
+
+  const enMode = document.getElementById("enMode");
+  enMode.value = store.get("enMode", "show");
+  const applyEn = () => { document.body.classList.toggle("en-hover", enMode.value === "hover");
+                          document.body.classList.toggle("en-off", enMode.value === "off"); };
+  applyEn();
+  enMode.onchange = () => { applyEn(); store.set("enMode", enMode.value); };
+
+  document.getElementById("clear").onclick = () => { linesEl.innerHTML = ""; };
+
+  // Recent lines with their voice file IDs, newest first, for matching Anki cards to lines.
+  const recent = [];
+
+  function add(jp, voice) {
+    recent.unshift({ key: norm(jp), voice });
+    if (recent.length > 100) recent.pop();
+    const empty = linesEl.querySelector(".empty");
+    if (empty) empty.remove();
+    const div = document.createElement("div");
+    div.className = "line";
+    const j = document.createElement("div");
+    j.className = "jp";
+    j.textContent = jp;
+    div.appendChild(j);
+    const e = document.createElement("div");
+    e.className = "en";
+    e.textContent = en[norm(jp)] || "";
+    div.appendChild(e);
+    linesEl.prepend(div);
+    while (linesEl.children.length > MAX) linesEl.lastChild.remove();
+    if (!document.getSelection().toString()) window.scrollTo({ top: 0 });
+  }
+
+  function connect() {
+    const ws = new WebSocket(`ws://${location.host || "localhost:6677"}/`);
+    ws.onopen = () => { dot.classList.add("on"); statusEl.textContent = "connected to game"; };
+    ws.onmessage = ev => {
+      let s = ev.data, voice = "";
+      try {
+        const m = JSON.parse(s);
+        if (m && typeof m.sentence === "string") { s = m.sentence; voice = m.voice || ""; }
+      } catch {}
+      add(s, voice);
+    };
+    ws.onclose = () => {
+      dot.classList.remove("on");
+      statusEl.textContent = "game not running — retrying";
+      setTimeout(connect, 2000);
+    };
+  }
+  connect();
+
+  // Anki: when Yomitan adds a card while the game runs, put the line's voice clip into the
+  // audio field and a screenshot of the game into the picture field. Only fills empty fields.
+  const ANKI = {
+    url: "http://127.0.0.1:8080",  // AnkiConnect (webBindPort)
+    model: "Lapis",
+    audioField: "SentenceAudio",
+    pictureField: "Picture",
+    sentenceField: "Sentence",
+  };
+  const anki = (action, params = {}) =>
+    fetch(ANKI.url, { method: "POST", body: JSON.stringify({ action, version: 6, params }) })
+      .then(r => r.json()).then(r => { if (r.error) throw new Error(r.error); return r.result; });
+  const plainText = html => { const d = document.createElement("div"); d.innerHTML = html; return d.textContent; };
+  let known = null;  // note IDs seen so far; cards that existed before the page opened are left alone
+
+  async function fillNewCards() {
+    if (!dot.classList.contains("on")) return;  // game not running
+    const ids = await anki("findNotes", { query: `"note:${ANKI.model}" added:1` });
+    if (known === null) { known = new Set(ids); return; }
+    for (const id of ids.filter(i => !known.has(i))) {
+      known.add(id);
+      const [info] = await anki("notesInfo", { notes: [id] });
+      const field = name => (info.fields[name] || {}).value || "";
+      // the line the card's sentence comes from, else the newest line
+      const sentence = norm(plainText(field(ANKI.sentenceField)));
+      const line = recent.find(l => sentence && l.key.includes(sentence)) || recent[0];
+      const note = { id, fields: {} };
+      if (!field(ANKI.audioField) && line && line.voice) {
+        note.audio = [{ url: `${location.origin}/voice/${line.voice}.ogg`,
+                        filename: `trails3rd_${line.voice}.ogg`, fields: [ANKI.audioField] }];
+      }
+      if (!field(ANKI.pictureField)) {
+        note.picture = [{ url: `${location.origin}/screenshot.jpg?${id}`,
+                          filename: `trails3rd_${id}.jpg`, fields: [ANKI.pictureField] }];
+      }
+      if (note.audio || note.picture) await anki("updateNoteFields", { note });
+    }
+  }
+  const ankiEl = document.getElementById("anki");
+  (function poll() {
+    fillNewCards()
+      .then(() => { ankiEl.textContent = "Anki ✓"; ankiEl.title = "Clip and screenshot go on new cards"; })
+      .catch(err => { ankiEl.textContent = "Anki ✗"; ankiEl.title = err.message; })
+      .finally(() => setTimeout(poll, 1500));
+  })();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,920 @@
+diff --git a/solution/ed_voice/ed_voice.vcxproj b/solution/ed_voice/ed_voice.vcxproj
+index 19e9cc9..c1cb39e 100644
+--- a/solution/ed_voice/ed_voice.vcxproj
++++ b/solution/ed_voice/ed_voice.vcxproj
+@@ -1,4 +1,4 @@
+-<?xml version="1.0" encoding="utf-8"?>
++﻿<?xml version="1.0" encoding="utf-8"?>
+ <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+   <ItemGroup Label="ProjectConfigurations">
+     <ProjectConfiguration Include="Debug|Win32">
+@@ -20,6 +20,7 @@
+     <ClInclude Include="..\..\src\ed_voice\core\load_config.h" />
+     <ClInclude Include="..\..\src\ed_voice\core\rnd_voice.h" />
+     <ClInclude Include="..\..\src\ed_voice\core\sora_voice.h" />
++    <ClInclude Include="..\..\src\ed_voice\core\text_feed.h" />
+     <ClInclude Include="..\..\src\ed_voice\core\voice_id_mapping.h" />
+     <ClInclude Include="..\..\src\ed_voice\ed_voice.h" />
+     <ClInclude Include="..\..\src\ed_voice\global\addresses.h" />
+@@ -61,6 +62,7 @@
+     <ClCompile Include="..\..\src\ed_voice\core\load_config.cpp" />
+     <ClCompile Include="..\..\src\ed_voice\core\rnd_voice.cpp" />
+     <ClCompile Include="..\..\src\ed_voice\core\sora_voice.cpp" />
++    <ClCompile Include="..\..\src\ed_voice\core\text_feed.cpp" />
+     <ClCompile Include="..\..\src\ed_voice\ed_voice.cpp" />
+     <ClCompile Include="..\..\src\ed_voice\global\global.cpp" />
+     <ClCompile Include="..\..\src\ed_voice\player\decoder.cpp" />
+diff --git a/src/ed_voice/asm/asm_tits.cpp b/src/ed_voice/asm/asm_tits.cpp
+index b82eb4f..84490a8 100644
+--- a/src/ed_voice/asm/asm_tits.cpp
++++ b/src/ed_voice/asm/asm_tits.cpp
+@@ -4,6 +4,18 @@
+ 
+ __declspec(naked) void asm_tits::text() {
+     __asm {
++        // Every printable character passes here (edi = text pointer on SC/3rd): feed it to the
++        // text feed, keeping the flags of the game's "cmp al, '#'".
++        pushfd
++        pushad
++        cmp     dword ptr[global.info.game], GameTitsFC
++        je      short skip_feed
++        push    edi
++        call    bridge::Text
++        skip_feed:
++        popad
++        popfd
++
+         jne     short next
+         pushad
+ 
+diff --git a/src/ed_voice/bridge/bridge.cpp b/src/ed_voice/bridge/bridge.cpp
+index 863ae9a..42deb9e 100644
+--- a/src/ed_voice/bridge/bridge.cpp
++++ b/src/ed_voice/bridge/bridge.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "global/global.h"
+ #include "core/sora_voice.h"
++#include "core/text_feed.h"
+ 
+ int __stdcall bridge::Play(void* b) {
+     return global.sv->Play((uint8_t*)b);
+@@ -10,3 +11,7 @@ int __stdcall bridge::Play(void* b) {
+ int __cdecl bridge::Stop() {
+     return global.sv->Stop();
+ }
++
++void __stdcall bridge::Text(void* p) {
++    core::OnTextChar((const uint8_t*)p);
++}
+diff --git a/src/ed_voice/bridge/bridge.h b/src/ed_voice/bridge/bridge.h
+index 8dda8cf..c7ffdda 100644
+--- a/src/ed_voice/bridge/bridge.h
++++ b/src/ed_voice/bridge/bridge.h
+@@ -5,6 +5,7 @@ namespace bridge {
+ 
+ int __stdcall Play(void* b);
+ int __cdecl Stop();
++void __stdcall Text(void* p);
+ 
+ int __cdecl LoadDat(void*, void* buff, int idx, unsigned offset, unsigned size);
+ int __cdecl LoadDatF(void* buff, int idx, void*, unsigned offset, unsigned size);
+diff --git a/src/ed_voice/bridge/bridge_dat.cpp b/src/ed_voice/bridge/bridge_dat.cpp
+index ba86f5c..245163a 100644
+--- a/src/ed_voice/bridge/bridge_dat.cpp
++++ b/src/ed_voice/bridge/bridge_dat.cpp
+@@ -35,7 +35,9 @@ constexpr RedirectDir kRedirectDirs[] = {
+     { 0x20, "voice/fonts" },
+     { 0x01, "voice/scena" },
+     { 0x21, "voice/scena" },
+-    { 0x22, "voice/scena" }
++    { 0x22, "voice/scena" },
++    { 0x30, "voice/scena" },  // battle: monster names and descriptions
++    { 0x3C, "voice/scena" }   // MNSNOTE2: the monster notebook's copy of them
+ };
+ static const char kRedirectDirDefault[] = "voice/files";
+ 
+diff --git a/src/ed_voice/core/load_config.cpp b/src/ed_voice/core/load_config.cpp
+index d45d4da..dcfe7c6 100644
+--- a/src/ed_voice/core/load_config.cpp
++++ b/src/ed_voice/core/load_config.cpp
+@@ -12,7 +12,7 @@ constexpr char kUrl[] = "https://github.com/ZhenjianYang/SoraVoice";
+ #define DEFINE_CONFIG(name, config_name, dft_value, comment) \
+     constexpr char k##name[] = #config_name; \
+     constexpr char k##name##Cmt[] = comment; \
+-    constexpr char k##name##Dft = dft_value;
++    constexpr int k##name##Dft = dft_value;
+ 
+ #define OUTPUT_CONFIG(strm, config, name) \
+     strm << k##name << " = " << config->name << "\n"; \
+@@ -33,6 +33,27 @@ DEFINE_CONFIG(disable_dialog_se, DisableDialogSe, 1, "# (Voiced lines only) Disa
+ DEFINE_CONFIG(disable_ao_ori_voice, DisableAoOriVoice, 1,
+               "# (AO only) Disable original scenario voice. (Play evo voice only)");
+ DEFINE_CONFIG(show_info, ShwoInfo, 1, "# Show information of SoraVoice (Lite) in the title bar.");
++DEFINE_CONFIG(text_feed, TextFeed, 1,
++              "# Show each dialog page on http://localhost:<TextFeedPort> (for Yomitan) and send it\n"
++              "# to WebSocket clients on the same port (texthooker-ui). 0 = off.");
++DEFINE_CONFIG(text_feed_port, TextFeedPort, 6677, "# Port of the text feed page.");
++DEFINE_CONFIG(open_page, OpenPage, 1,
++              "# Open the text feed page as a Chrome app window next to the game when it starts.");
++DEFINE_CONFIG(page_browser, PageBrowser, 0,
++              "# Browser for the page window, the one with Yomitan: 0 = Edge, 1 = Chrome.");
++DEFINE_CONFIG(page_mode, PageMode, 0,
++              "# 0 = page docked beside the game, with history.\n"
++              "# 1 = overlay: a see-through strip over the bottom of the game showing the current line.");
++DEFINE_CONFIG(overlay_opacity, OverlayOpacity, 85, "# Overlay opacity in percent (20 ~ 100).");
++DEFINE_CONFIG(overlay_height, OverlayHeight, 190, "# Overlay height in pixels.");
++DEFINE_CONFIG(overlay_expand_height, OverlayExpandHeight, 560,
++              "# Overlay height while expanded, so Yomitan's popup fits above the line.");
++DEFINE_CONFIG(overlay_expand_key, OverlayExpandKey, 120,
++              "# Key that expands/shrinks the overlay, as a Windows virtual-key code (120 = F9, 121 = F10).");
++DEFINE_CONFIG(window_x, WindowX, -1, "# Window position (left, top) in pixels. -1 = leave it where the game puts it.");
++DEFINE_CONFIG(window_y, WindowY, -1, "");
++DEFINE_CONFIG(window_width, WindowWidth, 0, "# Window client size in pixels. 0 = keep the game's size.");
++DEFINE_CONFIG(window_height, WindowHeight, 0, "");
+ 
+ static std::string Trim(const std::string& s) {
+     if (s.empty()) {
+@@ -67,6 +88,19 @@ bool core::LoadConfig(Config* config, const char* filename) {
+     SET_TO_DEFAULT(config, disable_dialog_se);
+     SET_TO_DEFAULT(config, disable_ao_ori_voice);
+     SET_TO_DEFAULT(config, show_info);
++    SET_TO_DEFAULT(config, text_feed);
++    SET_TO_DEFAULT(config, text_feed_port);
++    SET_TO_DEFAULT(config, open_page);
++    SET_TO_DEFAULT(config, page_browser);
++    SET_TO_DEFAULT(config, page_mode);
++    SET_TO_DEFAULT(config, overlay_opacity);
++    SET_TO_DEFAULT(config, overlay_height);
++    SET_TO_DEFAULT(config, overlay_expand_height);
++    SET_TO_DEFAULT(config, overlay_expand_key);
++    SET_TO_DEFAULT(config, window_x);
++    SET_TO_DEFAULT(config, window_y);
++    SET_TO_DEFAULT(config, window_width);
++    SET_TO_DEFAULT(config, window_height);
+ 
+     std::ifstream ifs(filename, std::ios::in);
+     if (!ifs) {
+@@ -87,6 +121,19 @@ bool core::LoadConfig(Config* config, const char* filename) {
+         SET_CONFIG(config, disable_dialog_se, name, value);
+         SET_CONFIG(config, disable_ao_ori_voice, name, value);
+         SET_CONFIG(config, show_info, name, value);
++        SET_CONFIG(config, text_feed, name, value);
++        SET_CONFIG(config, text_feed_port, name, value);
++        SET_CONFIG(config, open_page, name, value);
++        SET_CONFIG(config, page_browser, name, value);
++        SET_CONFIG(config, page_mode, name, value);
++        SET_CONFIG(config, overlay_opacity, name, value);
++        SET_CONFIG(config, overlay_height, name, value);
++        SET_CONFIG(config, overlay_expand_height, name, value);
++        SET_CONFIG(config, overlay_expand_key, name, value);
++        SET_CONFIG(config, window_x, name, value);
++        SET_CONFIG(config, window_y, name, value);
++        SET_CONFIG(config, window_width, name, value);
++        SET_CONFIG(config, window_height, name, value);
+     }
+ 
+     return true;
+@@ -105,6 +152,19 @@ bool core::SaveConfig(const Config* config, const char* filename, const Info* in
+     OUTPUT_CONFIG(ofs, config, volume);
+     OUTPUT_CONFIG(ofs, config, disable_text_se);
+     OUTPUT_CONFIG(ofs, config, disable_dialog_se);
++    OUTPUT_CONFIG(ofs, config, text_feed);
++    OUTPUT_CONFIG(ofs, config, text_feed_port);
++    OUTPUT_CONFIG(ofs, config, open_page);
++    OUTPUT_CONFIG(ofs, config, page_browser);
++    OUTPUT_CONFIG(ofs, config, page_mode);
++    OUTPUT_CONFIG(ofs, config, overlay_opacity);
++    OUTPUT_CONFIG(ofs, config, overlay_height);
++    OUTPUT_CONFIG(ofs, config, overlay_expand_height);
++    OUTPUT_CONFIG(ofs, config, overlay_expand_key);
++    OUTPUT_CONFIG(ofs, config, window_x);
++    OUTPUT_CONFIG(ofs, config, window_y);
++    OUTPUT_CONFIG(ofs, config, window_width);
++    OUTPUT_CONFIG(ofs, config, window_height);
+     if (info->game == GameAo) {
+         OUTPUT_CONFIG(ofs, config, disable_ao_ori_voice);
+     }
+diff --git a/src/ed_voice/core/sora_voice.cpp b/src/ed_voice/core/sora_voice.cpp
+index 159d002..8038672 100644
+--- a/src/ed_voice/core/sora_voice.cpp
++++ b/src/ed_voice/core/sora_voice.cpp
+@@ -1,5 +1,7 @@
+ #include "sora_voice.h"
+ 
++#include <Windows.h>
++
+ #include <filesystem>
+ #include <string>
+ #include <memory>
+@@ -8,6 +10,7 @@
+ 
+ #include "core/load_config.h"
+ #include "core/rnd_voice.h"
++#include "core/text_feed.h"
+ #include "core/voice_id_mapping.h"
+ #include "global/global.h"
+ #include "player/player.h"
+@@ -34,6 +37,7 @@ constexpr char kVoiceDir[] = "voice/%s";
+ constexpr char kAttrs[][4] = { "at9", "ogg", "wav" };
+ constexpr char kConfigFilename[] = "voice/ed_voice.ini";
+ constexpr int kAoRndVoiceDelayMs = 1000;
++constexpr char kWebDir[] = "voice/web";
+ 
+ constexpr const char* kInfo[] = { " - SoraVoice (Lite) ", kBuildDate };
+ }
+@@ -41,6 +45,23 @@ constexpr const char* kInfo[] = { " - SoraVoice (Lite) ", kBuildDate };
+ namespace {
+ using player::Player;
+ 
++// Move/resize the game window as set in the ini (WindowX/Y, WindowWidth/Height = client size).
++void PlaceWindow(HWND hwnd, const Config* config) {
++    RECT r;
++    GetWindowRect(hwnd, &r);
++    int x = config->window_x >= 0 ? config->window_x : r.left;
++    int y = config->window_y >= 0 ? config->window_y : r.top;
++    int w = r.right - r.left, h = r.bottom - r.top;
++    if (config->window_width > 0 && config->window_height > 0) {
++        RECT c{ 0, 0, config->window_width, config->window_height };
++        AdjustWindowRectEx(&c, GetWindowLong(hwnd, GWL_STYLE), FALSE, GetWindowLong(hwnd, GWL_EXSTYLE));
++        w = c.right - c.left;
++        h = c.bottom - c.top;
++    }
++    SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
++    LOG("Window placed at %d,%d size %dx%d", x, y, w, h);
++}
++
+ class SoraVoiceImpl : public SoraVoice {
+ public:
+     SoraVoiceImpl(const std::string& title, const std::string& built_date,
+@@ -119,6 +140,15 @@ SoraVoiceImpl::SoraVoiceImpl(const std::string& title, const std::string& built_
+         config_->disable_ao_ori_voice);
+     player_->SetVolume(config_->volume);
+ 
++    PlaceWindow((HWND)*global.addrs.pHwnd, config_);
++    if (config_->text_feed && core::StartTextFeed(config_->text_feed_port, kWebDir, *global.addrs.pHwnd) && config_->open_page) {
++        core::OpenPageWindow(config_->text_feed_port, *global.addrs.pHwnd, config_->page_browser == 0,
++                             config_->page_mode == 1,
++                             config_->overlay_height, config_->overlay_expand_height,
++                             config_->overlay_expand_key,
++                             config_->overlay_opacity);
++    }
++
+     memset(sigs_, 0, sizeof(*sigs_));
+     is_valid_ = true;
+ 
+@@ -243,6 +273,17 @@ int SoraVoiceImpl::Stop() {
+ // SoraVoiceImpl
+ }  // namespace
+ 
++std::string VoiceFileId(const std::string& digits) {
++    if (digits.empty() || digits.length() > kMaxVoiceIdLen) {
++        return "";
++    }
++    if (digits.length() > kMaxVoiceIdLenNeedMapping) {
++        return digits;
++    }
++    int num_vid = std::stoi(digits) + kVoiceIdAdjustAdder[digits.length()];
++    return num_vid < kNumMapping ? kVoiceIdMapping[num_vid] : "";
++}
++
+ std::unique_ptr<SoraVoice> SoraVoice::GetSoraVoice(
+         const std::string& title, const std::string& built_date,
+         std::vector<std::unique_ptr<char[]>>&& movable_strs) {
+diff --git a/src/ed_voice/core/sora_voice.h b/src/ed_voice/core/sora_voice.h
+index 5fdac58..3860bb5 100644
+--- a/src/ed_voice/core/sora_voice.h
++++ b/src/ed_voice/core/sora_voice.h
+@@ -16,4 +16,7 @@ public:
+             std::vector<std::unique_ptr<char[]>>&& movable_strs);
+ };  // SoraVoice
+ 
++// The voice file ID (voice/ogg/ch<ID>.ogg) for the digits of a ED6 cue #<digits>v; "" if none.
++std::string VoiceFileId(const std::string& digits);
++
+ #endif  // __CORE_SORA_VOICE_H__
+diff --git a/src/ed_voice/core/text_feed.cpp b/src/ed_voice/core/text_feed.cpp
+new file mode 100644
+index 0000000..27116c3
+--- /dev/null
++++ b/src/ed_voice/core/text_feed.cpp
+@@ -0,0 +1,539 @@
++#include "text_feed.h"
++
++#include <WinSock2.h>
++#include <Windows.h>
++#include <bcrypt.h>
++#include <gdiplus.h>
++#include <shellapi.h>
++
++#include <atomic>
++#include <deque>
++#include <fstream>
++#include <mutex>
++#include <sstream>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include "core/sora_voice.h"
++#include "utils/log.h"
++
++#pragma comment(lib, "ws2_32.lib")
++#pragma comment(lib, "bcrypt.lib")
++#pragma comment(lib, "gdiplus.lib")
++
++namespace {
++constexpr int kMaxPageLen = 4096;
++constexpr size_t kBacklog = 50;  // lines replayed to a client that connects late
++constexpr char kWsGuid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
++constexpr wchar_t kPageTitle[] = L"Sora 3rd Lines";  // <title> of voice/web/index.html
++constexpr int kMinPageWidth = 300;
++constexpr int kChromeTitleBar = 30;  // height of Chrome's app window title bar at 100% scaling
++constexpr int kShotMaxWidth = 1280;  // screenshots for Anki are scaled down to this width
++
++std::atomic<bool> running = false;
++std::string web_dir;
++HWND game_window = nullptr;
++HWND overlay_page = nullptr;  // the overlay strip, hidden while taking a screenshot
++
++// Game thread state: the page (or non-dialog string) the parser is inside.
++const uint8_t* cur_begin = nullptr;
++const uint8_t* cur_end = nullptr;
++std::string last_sent;
++
++std::mutex mtx;
++std::deque<std::string> outbox;   // JSON messages waiting for the server thread
++std::deque<std::string> backlog;  // last kBacklog messages
++
++bool IsSjisLead(uint8_t c) {
++    return (c >= 0x81 && c <= 0x9F) || (c >= 0xE0 && c <= 0xFC);
++}
++
++std::string SjisToUtf8(const std::string& s) {
++    int wn = MultiByteToWideChar(932, 0, s.data(), (int)s.size(), nullptr, 0);
++    std::wstring w(wn, L'\0');
++    MultiByteToWideChar(932, 0, s.data(), (int)s.size(), w.data(), wn);
++    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), wn, nullptr, 0, nullptr, nullptr);
++    std::string u(n, '\0');
++    WideCharToMultiByte(CP_UTF8, 0, w.data(), wn, u.data(), n, nullptr, nullptr);
++    return u;
++}
++
++std::string JsonString(const std::string& s) {
++    std::string r = "\"";
++    for (char c : s) {
++        switch (c) {
++        case '"': r += "\\\""; break;
++        case '\\': r += "\\\\"; break;
++        case '\n': r += "\\n"; break;
++        default:
++            if ((uint8_t)c < 0x20) {
++                char buf[8];
++                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
++                r += buf;
++            } else {
++                r += c;
++            }
++        }
++    }
++    return r + "\"";
++}
++
++// Read the page starting at p. Returns false for text that is not a dialog page
++// (NUL before any page end). *end receives the end of what was scanned, *voice the digits of
++// the page's first voice cue (#NNNNNv), if any.
++bool ReadPage(const uint8_t* p, const uint8_t** end, std::string* sjis, std::string* voice) {
++    int i = 0;
++    while (i < kMaxPageLen) {
++        uint8_t c = p[i];
++        if (c == 0x00) {
++            *end = p + i;
++            return false;
++        }
++        if (c == 0x02) {  // page end
++            *end = p + i + 1;
++            return true;
++        }
++        if (c == 0x01) {
++            sjis->push_back('\n');
++            i++;
++        } else if (c == 0x07) {  // color, one parameter byte
++            i += 2;
++        } else if (c < 0x20) {
++            i++;
++        } else if (c == '#' && p[i + 1] >= '0' && p[i + 1] <= '9') {  // #12F, #3Rruby#
++            int digits = ++i;
++            while (p[i] >= '0' && p[i] <= '9') i++;
++            if (p[i] == 'v' && voice->empty()) voice->assign((const char*)p + digits, i - digits);
++            if (p[i] == 'R') {
++                i++;
++                while (p[i] && p[i] != '#' && i < kMaxPageLen) i += IsSjisLead(p[i]) ? 2 : 1;
++            }
++            if (p[i]) i++;
++        } else if (IsSjisLead(c)) {
++            sjis->append((const char*)p + i, 2);
++            i += 2;
++        } else {
++            sjis->push_back((char)c);
++            i++;
++        }
++    }
++    *end = p + i;
++    return false;
++}
++
++void Push(const std::string& msg) {
++    std::scoped_lock lock(mtx);
++    outbox.push_back(msg);
++    backlog.push_back(msg);
++    if (backlog.size() > kBacklog) backlog.pop_front();
++}
++
++// ---- server ----------------------------------------------------------------------------
++
++std::string Base64(const uint8_t* d, size_t n) {
++    static const char t[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++    std::string r;
++    for (size_t i = 0; i < n; i += 3) {
++        uint32_t v = d[i] << 16 | (i + 1 < n ? d[i + 1] << 8 : 0) | (i + 2 < n ? d[i + 2] : 0);
++        r += t[v >> 18 & 63];
++        r += t[v >> 12 & 63];
++        r += i + 1 < n ? t[v >> 6 & 63] : '=';
++        r += i + 2 < n ? t[v & 63] : '=';
++    }
++    return r;
++}
++
++std::string WsAccept(const std::string& key) {
++    std::string s = key + kWsGuid;
++    uint8_t hash[20] = {};
++    BCryptHash(BCRYPT_SHA1_ALG_HANDLE, nullptr, 0, (PUCHAR)s.data(), (ULONG)s.size(), hash, 20);
++    return Base64(hash, 20);
++}
++
++std::string Header(const std::string& req, const char* name) {
++    std::string lower = req;
++    for (auto& c : lower) c = (char)tolower((uint8_t)c);
++    std::string n = std::string("\r\n") + name + ":";
++    for (auto& c : n) c = (char)tolower((uint8_t)c);
++    auto b = lower.find(n);
++    if (b == std::string::npos) return "";
++    b += n.size();
++    auto e = req.find("\r\n", b);
++    std::string v = req.substr(b, e - b);
++    v.erase(0, v.find_first_not_of(' '));
++    v.erase(v.find_last_not_of(' ') + 1);
++    return v;
++}
++
++bool SendAll(SOCKET s, const std::string& d) {
++    size_t sent = 0;
++    while (sent < d.size()) {
++        int r = send(s, d.data() + sent, (int)(d.size() - sent), 0);
++        if (r <= 0) return false;
++        sent += r;
++    }
++    return true;
++}
++
++std::string WsFrame(const std::string& text) {
++    std::string f(1, '\x81');
++    size_t n = text.size();
++    if (n < 126) {
++        f += (char)n;
++    } else if (n < 65536) {
++        f += (char)126;
++        f += (char)(n >> 8);
++        f += (char)(n & 0xFF);
++    } else {
++        f += (char)127;
++        for (int i = 7; i >= 0; i--) f += (char)((uint64_t)n >> (8 * i) & 0xFF);
++    }
++    return f + text;
++}
++
++const char* ContentType(const std::string& path) {
++    auto ext = path.substr(path.find_last_of('.') + 1);
++    if (ext == "html") return "text/html; charset=utf-8";
++    if (ext == "js") return "text/javascript; charset=utf-8";
++    if (ext == "css") return "text/css; charset=utf-8";
++    if (ext == "json") return "application/json; charset=utf-8";
++    if (ext == "ogg") return "audio/ogg";
++    if (ext == "jpg") return "image/jpeg";
++    return "application/octet-stream";
++}
++
++// The game's client area as a JPEG, scaled to at most kShotMaxWidth wide; "" if not possible.
++// The overlay strip is hidden for a moment so it is not in the picture.
++std::string Screenshot() {
++    if (!game_window || IsIconic(game_window)) return "";
++    RECT c;
++    GetClientRect(game_window, &c);
++    POINT tl{ 0, 0 };
++    ClientToScreen(game_window, &tl);
++    int w = c.right, h = c.bottom;
++    if (w <= 0 || h <= 0) return "";
++    bool hide = overlay_page && IsWindowVisible(overlay_page);
++    if (hide) {
++        ShowWindow(overlay_page, SW_HIDE);
++        Sleep(80);  // let the desktop redraw without it
++    }
++    int ow = w > kShotMaxWidth ? kShotMaxWidth : w, oh = h * ow / w;
++    HDC screen = GetDC(nullptr);
++    HDC mem = CreateCompatibleDC(screen);
++    HBITMAP bmp = CreateCompatibleBitmap(screen, ow, oh);
++    HGDIOBJ old = SelectObject(mem, bmp);
++    SetStretchBltMode(mem, HALFTONE);
++    StretchBlt(mem, 0, 0, ow, oh, screen, tl.x, tl.y, w, h, SRCCOPY);
++    SelectObject(mem, old);
++    DeleteDC(mem);
++    ReleaseDC(nullptr, screen);
++    if (hide) ShowWindow(overlay_page, SW_SHOWNOACTIVATE);
++
++    static ULONG_PTR gdiplus = 0;
++    if (!gdiplus) {
++        Gdiplus::GdiplusStartupInput in;
++        Gdiplus::GdiplusStartup(&gdiplus, &in, nullptr);
++    }
++    CLSID jpeg{};
++    UINT n = 0, size = 0;
++    Gdiplus::GetImageEncodersSize(&n, &size);
++    std::vector<char> codec_buf(size);
++    auto* codecs = (Gdiplus::ImageCodecInfo*)codec_buf.data();
++    Gdiplus::GetImageEncoders(n, size, codecs);
++    for (UINT i = 0; i < n; i++) {
++        if (wcscmp(codecs[i].MimeType, L"image/jpeg") == 0) jpeg = codecs[i].Clsid;
++    }
++    std::string out;
++    IStream* stream = nullptr;
++    if (CreateStreamOnHGlobal(nullptr, TRUE, &stream) == S_OK) {
++        Gdiplus::Bitmap image(bmp, nullptr);
++        if (image.Save(stream, &jpeg, nullptr) == Gdiplus::Ok) {
++            STATSTG st;
++            stream->Stat(&st, STATFLAG_NONAME);
++            out.resize((size_t)st.cbSize.QuadPart);
++            LARGE_INTEGER zero{};
++            stream->Seek(zero, STREAM_SEEK_SET, nullptr);
++            ULONG got = 0;
++            stream->Read(out.data(), (ULONG)out.size(), &got);
++        }
++        stream->Release();
++    }
++    DeleteObject(bmp);
++    return out;
++}
++
++// /voice/<ID>.ogg: the Evo voice file voice/ogg/ch<ID>.ogg (IDs are digits only); "" otherwise.
++std::string VoicePath(const std::string& path) {
++    const std::string prefix = "/voice/", suffix = ".ogg";
++    if (path.size() <= prefix.size() + suffix.size() || path.rfind(prefix, 0) != 0 ||
++        path.compare(path.size() - suffix.size(), suffix.size(), suffix) != 0) {
++        return "";
++    }
++    std::string id = path.substr(prefix.size(), path.size() - prefix.size() - suffix.size());
++    return id.find_first_not_of("0123456789") == std::string::npos ? "voice/ogg/ch" + id + suffix : "";
++}
++
++void ServeFile(SOCKET s, const std::string& req) {
++    auto b = req.find(' ') + 1;
++    std::string path = req.substr(b, req.find(' ', b) - b);
++    path = path.substr(0, path.find('?'));
++    if (path == "/") path = "/index.html";
++    std::string body;
++    bool ok = path.find("..") == std::string::npos;
++    if (ok && path == "/screenshot.jpg") {
++        body = Screenshot();
++        ok = !body.empty();
++    } else if (ok) {
++        std::string file = path.rfind("/voice/", 0) == 0 ? VoicePath(path) : web_dir + path;
++        std::ifstream ifs(file, std::ios::binary);
++        ok = !file.empty() && (bool)ifs;
++        std::stringstream ss;
++        ss << ifs.rdbuf();
++        body = ss.str();
++    }
++    std::string head = ok ? "HTTP/1.1 200 OK\r\n" : "HTTP/1.1 404 Not Found\r\n";
++    head += std::string("Content-Type: ") + (ok ? ContentType(path) : "text/plain") + "\r\n";
++    head += "Cache-Control: no-cache\r\nConnection: close\r\n";
++    head += "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n";
++    SendAll(s, head + body);
++}
++
++void Serve(SOCKET listener) {
++    std::vector<SOCKET> clients;  // WebSocket clients
++    while (running) {
++        fd_set rd;
++        FD_ZERO(&rd);
++        FD_SET(listener, &rd);
++        for (auto c : clients) FD_SET(c, &rd);
++        timeval tv{ 0, 50 * 1000 };
++        if (select(0, &rd, nullptr, nullptr, &tv) > 0) {
++            if (FD_ISSET(listener, &rd)) {
++                SOCKET s = accept(listener, nullptr, nullptr);
++                DWORD timeout = 2000;
++                setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
++                std::string req;
++                char buf[2048];
++                while (req.find("\r\n\r\n") == std::string::npos && req.size() < 16384) {
++                    int r = recv(s, buf, sizeof(buf), 0);
++                    if (r <= 0) break;
++                    req.append(buf, r);
++                }
++                std::string key = Header(req, "Sec-WebSocket-Key");
++                if (!key.empty()) {
++                    SendAll(s, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
++                               "Connection: Upgrade\r\nSec-WebSocket-Accept: " + WsAccept(key) + "\r\n\r\n");
++                    std::scoped_lock lock(mtx);
++                    for (const auto& m : backlog) SendAll(s, WsFrame(m));
++                    clients.push_back(s);
++                } else {
++                    if (req.rfind("GET ", 0) == 0) ServeFile(s, req);
++                    closesocket(s);
++                }
++            }
++            for (auto it = clients.begin(); it != clients.end();) {
++                char buf[1024];
++                // Client frames (pings, close) are read and dropped; 0 or error means gone.
++                if (FD_ISSET(*it, &rd) && recv(*it, buf, sizeof(buf), 0) <= 0) {
++                    closesocket(*it);
++                    it = clients.erase(it);
++                } else {
++                    ++it;
++                }
++            }
++        }
++        std::deque<std::string> msgs;
++        {
++            std::scoped_lock lock(mtx);
++            msgs.swap(outbox);
++        }
++        for (const auto& m : msgs) {
++            for (auto it = clients.begin(); it != clients.end();) {
++                if (SendAll(*it, WsFrame(m))) {
++                    ++it;
++                } else {
++                    closesocket(*it);
++                    it = clients.erase(it);
++                }
++            }
++        }
++    }
++}
++}  // namespace
++
++bool core::StartTextFeed(int port, const char* dir, void* game_hwnd) {
++    web_dir = dir;
++    game_window = (HWND)game_hwnd;
++    WSADATA wsa;
++    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
++        LOG("TextFeed: WSAStartup failed");
++        return false;
++    }
++    SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
++    sockaddr_in addr{};
++    addr.sin_family = AF_INET;
++    addr.sin_port = htons((u_short)port);
++    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    if (bind(listener, (sockaddr*)&addr, sizeof(addr)) != 0 || listen(listener, 8) != 0) {
++        LOG("TextFeed: cannot listen on port %d", port);
++        closesocket(listener);
++        return false;
++    }
++    running = true;
++    std::thread(Serve, listener).detach();
++    LOG("TextFeed: http://localhost:%d", port);
++    return true;
++}
++
++namespace {
++// The overlay is a borderless strip, so close it with the game instead of leaving it on screen.
++struct OverlayCloser {
++    ~OverlayCloser() {
++        if (overlay_page) PostMessageW(overlay_page, WM_CLOSE, 0, 0);
++    }
++} overlay_closer;
++
++HWND FindPage() {
++    return FindWindowW(L"Chrome_WidgetWin_1", kPageTitle);  // Chromium (Chrome, Edge) titles app windows after the page
++}
++
++// Docked: the free space right of the game, or below it when there is no room on the right.
++RECT DockedRect(HWND game) {
++    RECT g;
++    GetWindowRect(game, &g);
++    MONITORINFO mi{ sizeof(mi) };
++    GetMonitorInfoW(MonitorFromWindow(game, MONITOR_DEFAULTTONEAREST), &mi);
++    RECT w = mi.rcWork;
++    if (w.right - g.right >= kMinPageWidth) {
++        return { g.right, w.top, w.right, w.bottom };
++    }
++    return { w.left, g.bottom, w.right, w.bottom };
++}
++
++// Overlay: the bottom of the game's client area.
++RECT OverlayRect(HWND game, int height) {
++    RECT c;
++    GetClientRect(game, &c);
++    POINT tl{ 0, c.bottom - height }, br{ c.right, c.bottom };
++    ClientToScreen(game, &tl);
++    ClientToScreen(game, &br);
++    return { tl.x, tl.y, br.x, br.y };
++}
++
++void Place(HWND page, const RECT& r) {
++    SetWindowPos(page, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
++                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
++}
++
++// Chrome draws its own title bar inside the window, so the overlay window is made taller by
++// that bar and the bar is cut off with a window region.
++void PlaceOverlay(HWND page, const RECT& r) {
++    int bar = kChromeTitleBar * (int)GetDpiForWindow(page) / 96;
++    int w = r.right - r.left, h = r.bottom - r.top;
++    SetWindowPos(page, nullptr, r.left, r.top - bar, w, h + bar, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
++    SetWindowRgn(page, CreateRectRgn(0, bar, w, h + bar), TRUE);
++}
++
++// Chrome takes the focus, sometimes a moment after its window appears. Windows only lets us
++// take it back while attached to the foreground window's input, so retry for a while.
++void RefocusGame(HWND game) {
++    for (int i = 0; i < 30; i++) {
++        HWND fg_wnd = GetForegroundWindow();
++        if (fg_wnd != game) {
++            DWORD fg = GetWindowThreadProcessId(fg_wnd, nullptr);
++            DWORD me = GetCurrentThreadId();
++            AttachThreadInput(fg, me, TRUE);
++            SetForegroundWindow(game);
++            AttachThreadInput(fg, me, FALSE);
++        }
++        Sleep(100);
++    }
++}
++}  // namespace
++
++void core::OpenPageWindow(int port, void* game_hwnd, bool edge, bool overlay, int height, int expand_height,
++                          int expand_key, int opacity) {
++    std::thread([=, game = (HWND)game_hwnd] {
++        // A page left open from last time may be in the other mode: replace it.
++        if (HWND old = FindPage()) {
++            PostMessageW(old, WM_CLOSE, 0, 0);
++            for (int i = 0; i < 50 && IsWindow(old); i++) Sleep(100);
++        }
++        std::wstring args = L"--app=http://localhost:" + std::to_wstring(port) + (overlay ? L"/?overlay" : L"/");
++        const wchar_t* exe = edge ? L"msedge.exe" : L"chrome.exe";
++        if ((INT_PTR)ShellExecuteW(nullptr, L"open", exe, args.c_str(), nullptr, SW_SHOWNOACTIVATE) <= 32) {
++            LOG("TextFeed: cannot start the browser");
++            return;
++        }
++        HWND page = nullptr;
++        for (int i = 0; i < 100 && !page; i++) {
++            Sleep(150);
++            page = FindPage();
++        }
++        if (!page) {
++            LOG("TextFeed: page window not found");
++            return;
++        }
++        ShowWindow(page, SW_RESTORE);
++        if (!overlay) {
++            Place(page, DockedRect(game));
++            RefocusGame(game);
++            return;
++        }
++
++        // Borderless, see-through, out of the taskbar, and owned by the game so it stays above
++        // the game without being on top of every other window.
++        overlay_page = page;
++        LONG style = GetWindowLongW(page, GWL_STYLE);
++        SetWindowLongW(page, GWL_STYLE, (style & ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU)) | WS_POPUP);
++        LONG ex = GetWindowLongW(page, GWL_EXSTYLE);
++        SetWindowLongW(page, GWL_EXSTYLE, (ex & ~WS_EX_APPWINDOW) | WS_EX_LAYERED | WS_EX_TOOLWINDOW);
++        SetWindowLongPtrW(page, GWLP_HWNDPARENT, (LONG_PTR)game);
++        int alpha = opacity < 20 ? 20 : opacity > 100 ? 100 : opacity;
++        SetLayeredWindowAttributes(page, 0, (BYTE)(alpha * 255 / 100), LWA_ALPHA);
++        RECT last = OverlayRect(game, height);
++        PlaceOverlay(page, last);
++        RefocusGame(game);
++
++        // Follow the game window; hide while it is minimized. expand_key grows the strip upward
++        // (room for Yomitan's popup) and shrinks it again, while the game or the strip has focus.
++        bool hidden = false, expanded = false, key_down = false;
++        while (IsWindow(game) && IsWindow(page)) {
++            HWND fg = GetForegroundWindow();
++            bool down = (fg == game || fg == page) && (GetAsyncKeyState(expand_key) & 0x8000);
++            if (down && !key_down) expanded = !expanded;
++            key_down = down;
++            if (IsIconic(game)) {
++                if (!hidden) ShowWindow(page, SW_HIDE);
++                hidden = true;
++            } else {
++                if (hidden) ShowWindow(page, SW_SHOWNOACTIVATE);
++                hidden = false;
++                RECT r = OverlayRect(game, expanded ? expand_height : height);
++                if (memcmp(&r, &last, sizeof(r))) {
++                    PlaceOverlay(page, r);
++                    last = r;
++                }
++            }
++            Sleep(50);
++        }
++    }).detach();
++}
++
++void core::OnTextChar(const uint8_t* p) {
++    if (!running || (p >= cur_begin && p < cur_end)) {
++        return;
++    }
++    std::string sjis, cue;
++    const uint8_t* end;
++    bool page = ReadPage(p, &end, &sjis, &cue);
++    cur_begin = p;
++    cur_end = end;
++    while (!sjis.empty() && sjis.back() == '\n') sjis.pop_back();
++    if (!page || sjis.empty() || sjis == last_sent) {
++        return;
++    }
++    last_sent = sjis;
++    std::string voice = cue.empty() ? "" : VoiceFileId(cue);
++    Push("{\"sentence\":" + JsonString(SjisToUtf8(sjis)) + ",\"voice\":" + JsonString(voice) + "}");
++}
+diff --git a/src/ed_voice/core/text_feed.h b/src/ed_voice/core/text_feed.h
+new file mode 100644
+index 0000000..c1e0677
+--- /dev/null
++++ b/src/ed_voice/core/text_feed.h
+@@ -0,0 +1,26 @@
++#ifndef __CORE_TEXT_FEED_H__
++#define __CORE_TEXT_FEED_H__
++
++#include <cstdint>
++
++namespace core {
++// Serve web_dir over http://localhost:port and push every dialog page shown in game to
++// WebSocket clients on the same port, as {"sentence": "...", "voice": "<voice file ID>"}
++// (texthooker-ui format). Also serves /voice/<ID>.ogg (the Evo clip) and /screenshot.jpg
++// (the game window), for Anki cards.
++bool StartTextFeed(int port, const char* web_dir, void* game_hwnd);
++
++// Open the page as a browser app window (the user's profile, so Yomitan is there). Docked: in the
++// free space right of the game window, or below it. Overlay: a borderless see-through strip of
++// the given height and opacity (percent) over the bottom of the game, following the game window.
++// edge: open it in Edge instead of Chrome.
++// Pressing expand_key (a virtual-key code) grows the overlay to expand_height, for Yomitan's popup.
++void OpenPageWindow(int port, void* game_hwnd, bool edge, bool overlay, int height, int expand_height,
++                    int expand_key, int opacity);
++
++// Called by the text hook for every printable character the game's text parser reaches.
++// p points at that character inside the scenario text (Shift-JIS).
++void OnTextChar(const uint8_t* p);
++}  // namespace core
++
++#endif  // __CORE_TEXT_FEED_H__
+diff --git a/src/ed_voice/global/config.h b/src/ed_voice/global/config.h
+index 3e9cdb0..9a42d73 100644
+--- a/src/ed_voice/global/config.h
++++ b/src/ed_voice/global/config.h
+@@ -7,6 +7,19 @@ typedef struct Config {
+     int disable_dialog_se;
+     int disable_ao_ori_voice;
+     int show_info;
++    int text_feed;
++    int text_feed_port;
++    int open_page;
++    int page_browser;
++    int page_mode;
++    int overlay_opacity;
++    int overlay_height;
++    int overlay_expand_height;
++    int overlay_expand_key;
++    int window_x;
++    int window_y;
++    int window_width;
++    int window_height;
+ } Config;
+ 
+ #endif  // __GLOBAL_CONFIG_H__
+diff --git a/src/ed_voice/player/player.h b/src/ed_voice/player/player.h
+index 38ba080..bcceac4 100644
+--- a/src/ed_voice/player/player.h
++++ b/src/ed_voice/player/player.h
+@@ -3,6 +3,7 @@
+ 
+ #include <functional>
+ #include <memory>
++#include <string>
+ #include <string_view>
+ #include <vector>
+ 
+diff --git a/src/ed_voice/utils/mem_matcher.h b/src/ed_voice/utils/mem_matcher.h
+index 5962314..49a1d85 100644
+--- a/src/ed_voice/utils/mem_matcher.h
++++ b/src/ed_voice/utils/mem_matcher.h
+@@ -1,6 +1,7 @@
+ #ifndef __UTILS_MEM_MATCHER_H__
+ #define __UTILS_MEM_MATCHER_H__
+ 
++#include <string>
+ #include <string_view>
+ #include <vector>
+ 
